@@ -15,7 +15,8 @@
 # limitations under the License.
 
 from __future__ import print_function
-import argparse, git, datetime, numpy, pygments.lexers, traceback, time, os, fnmatch, json, progressbar, sys
+import argparse, datetime, fnmatch, json, os, sys, time, traceback
+import git, numpy, pygments.lexers, progressbar
 
 # Some filetypes in Pygments are not necessarily computer code, but configuration/documentation. Let's not include those.
 IGNORE_PYGMENTS_FILETYPES = ['*.json', '*.md', '*.ps', '*.eps', '*.txt', '*.xml', '*.xsl', '*.rss', '*.xslt', '*.xsd', '*.wsdl', '*.wsf', '*.yaml', '*.yml']
@@ -29,7 +30,7 @@ c = chr if sys.version_info[0] >= 3 else unichr
 widget_kwargs = dict(samples=10000)
 if sys.version_info[0] >= 3:
     # Emojis!
-    widget_kwargs.update(dict(marker='\U0001f30a', right='\u26f5', left='\U0001f32c', markers=''.join(chr(0x1f311 + i) for i in range(8))))
+    widget_kwargs.update(dict(marker='\U0001f30a', right='\u26f5', left='\U0001f32c', markers=''.join(chr(0x1f311 + i) for i in range(8))))  # TODO require special fonts installed and the console configured for unicode
 
 
 def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir='.', branch='master', all_filetypes=False):
@@ -79,7 +80,8 @@ def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir
                 and not any([fnmatch.fnmatch(path, pattern) for pattern in ignore]))
         return ok_entry_paths[path]
 
-    def get_entries(commit):
+    def get_blob_entries(commit):
+        ''' Returns list of all file blob entries. '''
         return [entry for entry in commit.tree.traverse()
                 if entry.type == 'blob' and entry_path_ok(entry.path)]
 
@@ -89,19 +91,23 @@ def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir
         for i, commit in enumerate(reversed(master_commits)):
             bar.update(i)
             n = 0
-            for entry in get_entries(commit):
+            for blob in get_blob_entries(commit):
                 n += 1
-                _, ext = os.path.splitext(entry.path)
+                _, ext = os.path.splitext(blob.path)
                 curves_set.add(('ext', ext))
+                curves_set.add(('filesize', blob.size))
             entries_total += n
 
     def get_file_histogram(commit, path):
+        ''' Returns {(datum-name, datum-value) -> sum of LOCs}, where name is by-cohort, by-file extension, by-author, by-commit. '''
         h = {}
         try:
-            for old_commit, lines in repo.blame(commit, path):
+            for old_commit, lines in repo.blame(commit, path):  # iterates over list of tuples associating a Commit object with a list of lines that changed within the given commit
                 cohort = commit2cohort.get(old_commit.hexsha, "MISSING")
                 _, ext = os.path.splitext(path)
-                keys = [('cohort', cohort), ('ext', ext), ('author', old_commit.author.name)]
+                blobs = get_blob_entries(old_commit)  # gets file metadata for that commit
+                size = [blob.size for blob in blobs if blob.name == path]  # TODO check if this really checks the right path
+                keys = [('cohort', cohort), ('ext', ext), ('author', old_commit.author.name), ('filesize', size[0] if size else 0)]
 
                 if old_commit.hexsha in commit2timestamp:
                     keys.append(('sha', old_commit.hexsha))
@@ -116,7 +122,7 @@ def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir
 
     curves = {}
     ts = []
-    file_histograms = {}
+    file_histograms = {}  # file path -> commit histogram
     last_commit = None
     commit_history = {}
 
@@ -135,13 +141,13 @@ def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir
             last_commit = commit
 
             histogram = {}
-            entries = get_entries(commit)
-            for entry in entries:
+            blobs = get_blob_entries(commit)
+            for blob in blobs:
                 bar.update(entries_processed)
                 entries_processed += 1
-                if entry.path in changed_files or entry.path not in file_histograms:
-                    file_histograms[entry.path] = get_file_histogram(commit, entry.path)
-                for key, count in file_histograms[entry.path].items():
+                if blob.path in changed_files or blob.path not in file_histograms:
+                    file_histograms[blob.path] = get_file_histogram(commit, blob.path)
+                for key, count in file_histograms[blob.path].items():
                     histogram[key] = histogram.get(key, 0) + count
 
             for key, count in histogram.items():
@@ -167,6 +173,7 @@ def analyze(repo, cohortfm='%Y', interval=7*24*60*60, ignore=[], only=[], outdir
     dump_json('cohorts.json', 'cohort', lambda c: 'Code added in %s' % c)
     dump_json('exts.json', 'ext')
     dump_json('authors.json', 'author')
+    dump_json('filesizes.json', 'filesize')
 
     # Dump survival data
     fn = os.path.join(outdir, 'survival.json')
